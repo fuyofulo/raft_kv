@@ -1,7 +1,7 @@
 {
   "persistent": {
-    "current_term": 64,
-    "voted_for": 1,
+    "current_term": 102,
+    "voted_for": 4,
     "log": [
       {
         "term": 27,
@@ -46,18 +46,122 @@
         },
         "client_id": 1,
         "request_id": 1770564852026855000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770567423459949000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770567427502243000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770567430332512000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770567431615656000
+      },
+      {
+        "term": 70,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770570426980398000
+      },
+      {
+        "term": 84,
+        "command": {
+          "Update": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770570472087254000
+      },
+      {
+        "term": 101,
+        "command": {
+          "Delete": {
+            "key": "x"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770575713244799000
+      },
+      {
+        "term": 101,
+        "command": {
+          "Delete": {
+            "key": "x"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770575715965355000
+      },
+      {
+        "term": 101,
+        "command": {
+          "Delete": {
+            "key": "x"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770575717653268000
+      },
+      {
+        "term": 101,
+        "command": {
+          "Delete": {
+            "key": "x"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770575719954531000
       }
     ]
   },
-  "commit_index": 4,
-  "last_applied": 4,
-  "state_machine": {
-    "x": "10"
-  },
+  "commit_index": 14,
+  "last_applied": 14,
+  "state_machine": {},
   "dedup_table": {
     "1": {
-      "request_id": 1770564852026855000,
-      "log_index": 4,
+      "request_id": 1770575719954531000,
+      "log_index": 14,
       "message": "ok"
     }
   }

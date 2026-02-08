@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "Leader" | "Follower" | "Candidate" | "Unknown";
 
@@ -193,6 +193,7 @@ export default function App() {
   const [clientId, setClientId] = useState("1");
   const [requestId, setRequestId] = useState("");
   const [clientResults, setClientResults] = useState<ClientResult[]>([]);
+  const clientResultsRef = useRef<HTMLDivElement | null>(null);
 
   const pushToast = (message: string, kind: Toast["kind"] = "info") => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -263,6 +264,12 @@ export default function App() {
   }, []);
 
   const nodeList = useMemo(() => NODE_IDS.map((id) => nodes[id]), [nodes]);
+
+  useEffect(() => {
+    if (clientResultsRef.current) {
+      clientResultsRef.current.scrollTop = 0;
+    }
+  }, [clientResults]);
 
   const submitClientCommand = async (e: FormEvent) => {
     e.preventDefault();
@@ -345,7 +352,7 @@ export default function App() {
   return (
     <div className="screen">
       <header className="topbar">
-        <div className="title">RAFT_KV // TERMINAL CONTROL</div>
+        <div className="title">RAFT_KV // @fuyofulo</div>
         <div className="meta">api={API_BASE}</div>
       </header>
 
@@ -399,6 +406,16 @@ export default function App() {
                 </div>
               </article>
             ))}
+            <article className="node-card feed-node-card">
+              <div className="panel-title">GLOBAL FEED</div>
+              <div className="events tight">
+                {eventsFeed.map((ev, idx) => (
+                  <div className="event-line" key={`${ev.timestamp_ms}-${idx}`}>
+                    n{ev.node_id} t{ev.term} {ev.kind}: {ev.message}
+                  </div>
+                ))}
+              </div>
+            </article>
           </div>
         </section>
 
@@ -484,7 +501,7 @@ export default function App() {
                 run command
               </button>
             </form>
-            <div className="events tight">
+            <div className="events tight" ref={clientResultsRef}>
               {clientResults.map((res, idx) => (
                 <div className="event-line client-line" key={idx}>
                   ok={String(res.ok)} target={res.target_node} final={res.final_node} {res.message}
@@ -494,16 +511,6 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel feed-panel">
-            <div className="panel-title">GLOBAL FEED</div>
-            <div className="events tight">
-              {eventsFeed.map((ev, idx) => (
-                <div className="event-line" key={`${ev.timestamp_ms}-${idx}`}>
-                  n{ev.node_id} t{ev.term} {ev.kind}: {ev.message}
-                </div>
-              ))}
-            </div>
-          </section>
         </aside>
       </main>
     </div>
