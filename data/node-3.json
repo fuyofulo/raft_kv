@@ -1,0 +1,64 @@
+{
+  "persistent": {
+    "current_term": 64,
+    "voted_for": 1,
+    "log": [
+      {
+        "term": 27,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770562062221296000
+      },
+      {
+        "term": 27,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770563136586908000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770564845242236000
+      },
+      {
+        "term": 64,
+        "command": {
+          "Put": {
+            "key": "x",
+            "value": "10"
+          }
+        },
+        "client_id": 1,
+        "request_id": 1770564852026855000
+      }
+    ]
+  },
+  "commit_index": 4,
+  "last_applied": 4,
+  "state_machine": {
+    "x": "10"
+  },
+  "dedup_table": {
+    "1": {
+      "request_id": 1770564852026855000,
+      "log_index": 4,
+      "message": "ok"
+    }
+  }
+}

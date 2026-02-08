@@ -2,8 +2,10 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use raft_kv::raft::events::{RaftEvent, install_event_sender, new_event, emit_event};
 use raft_kv::raft::state::{
     AppendEntries, AppendEntriesResponse, PersistentState, RaftNode, RequestVote,
     RequestVoteResponse, Role, VolatileState,
@@ -72,6 +74,84 @@ fn persist_best_effort(node: &RaftNode, path: &Path) {
     }
 }
 
+fn parse_data_and_control(id: u64, args: &[String]) -> (PathBuf, Option<String>) {
+    let mut data_path = PathBuf::from(format!("data/node-{}.json", id));
+    let mut control_url = env::var("CONTROL_PLANE_URL").ok();
+
+    if let Some(a4) = args.get(4) {
+        if a4.starts_with("http://") || a4.starts_with("https://") {
+            control_url = Some(a4.clone());
+        } else {
+            data_path = PathBuf::from(a4);
+        }
+    }
+    if let Some(a5) = args.get(5) {
+        control_url = Some(a5.clone());
+    }
+
+    (data_path, control_url)
+}
+
+async fn post_events_task(mut rx: tokio::sync::mpsc::UnboundedReceiver<RaftEvent>, control_url: String) {
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}/events", control_url.trim_end_matches('/'));
+
+    while let Some(event) = rx.recv().await {
+        let _ = client.post(&endpoint).json(&event).send().await;
+    }
+}
+
+async fn poll_enabled_task(
+    id: u64,
+    control_url: String,
+    enabled: Arc<AtomicBool>,
+) {
+    let client = reqwest::Client::new();
+    let endpoint = format!(
+        "{}/nodes/{}/enabled",
+        control_url.trim_end_matches('/'),
+        id
+    );
+
+    loop {
+        let next = match client.get(&endpoint).send().await {
+            Ok(resp) => {
+                let json = resp.json::<serde_json::Value>().await.ok();
+                json.and_then(|v| v.get("enabled").and_then(|x| x.as_bool()))
+                    .unwrap_or(true)
+            }
+            Err(_) => true,
+        };
+        enabled.store(next, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn is_link_allowed(
+    client: &reqwest::Client,
+    control_url: Option<&str>,
+    from: u64,
+    to: u64,
+) -> bool {
+    let Some(url) = control_url else {
+        return true;
+    };
+    let endpoint = format!(
+        "{}/allow/{}/{}",
+        url.trim_end_matches('/'),
+        from,
+        to
+    );
+    match client.get(endpoint).send().await {
+        Ok(resp) => {
+            let json = resp.json::<serde_json::Value>().await.ok();
+            json.and_then(|v| v.get("allow").and_then(|x| x.as_bool()))
+                .unwrap_or(true)
+        }
+        Err(_) => true,
+    }
+}
+
 async fn send_request_vote_rpc(
     addr: String,
     req: RequestVote,
@@ -103,11 +183,16 @@ async fn send_append_entries_rpc(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // usage: cargo run --bin node -- <id> <listen_addr> <peer_ids_csv>
-    // optional data path: cargo run --bin node -- <id> <listen_addr> <peer_ids_csv> <data_path>
-    // example: cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json
+    // optional args:
+    //   [data_path]
+    //   [control_plane_url]
+    // examples:
+    //   cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json
+    //   cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 http://127.0.0.1:7000
+    //   cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json http://127.0.0.1:7000
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: node <id> <listen_addr> <peer_ids_csv> [data_path]");
+        eprintln!("usage: node <id> <listen_addr> <peer_ids_csv> [data_path|control_plane_url] [control_plane_url]");
         std::process::exit(1);
     }
 
@@ -115,11 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = args[2].parse()?;
     let peers = parse_peers(&args[3], id);
     let peers_for_election = peers.clone();
-    let storage_path = if args.len() >= 5 {
-        PathBuf::from(&args[4])
-    } else {
-        PathBuf::from(format!("data/node-{}.json", id))
-    };
+    let (storage_path, control_plane_url) = parse_data_and_control(id, &args);
 
     let mut initial_node = build_node(id, peers);
     if let Some(durable) = load_durable_state(&storage_path)? {
@@ -148,11 +229,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node = Arc::new(Mutex::new(initial_node));
     let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
+    let node_enabled = Arc::new(AtomicBool::new(true));
     let storage_path = Arc::new(storage_path);
     let svc = RaftRpcService {
         node: Arc::clone(&node),
         last_heartbeat: Arc::clone(&last_heartbeat),
         storage_path: Arc::clone(&storage_path),
+        node_enabled: Arc::clone(&node_enabled),
     };
 
     let node_for_election = Arc::clone(&node);
@@ -161,13 +244,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peers_for_heartbeats = peers_for_election.clone();
     let storage_for_election = Arc::clone(&storage_path);
     let storage_for_heartbeats = Arc::clone(&storage_path);
+    let enabled_for_election = Arc::clone(&node_enabled);
+    let enabled_for_heartbeats = Arc::clone(&node_enabled);
+    let control_for_election = control_plane_url.clone();
+    let control_for_heartbeats = control_plane_url.clone();
+
+    if let Some(url) = control_plane_url.clone() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        install_event_sender(tx);
+        tokio::spawn(post_events_task(rx, url.clone()));
+        tokio::spawn(poll_enabled_task(id, url, Arc::clone(&node_enabled)));
+    }
 
     tokio::spawn(async move {
+        let control_http = reqwest::Client::new();
         let mut seed = seed_for_node(id);
         let mut election_timeout = next_election_timeout(&mut seed);
 
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
+
+            if !enabled_for_election.load(Ordering::Relaxed) {
+                continue;
+            }
 
             let elapsed = {
                 let t = hb_for_election.lock().expect("heartbeat lock poisoned");
@@ -198,6 +297,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut votes = 1;
             for peer in &peers_for_election {
+                if !is_link_allowed(
+                    &control_http,
+                    control_for_election.as_deref(),
+                    id,
+                    *peer,
+                )
+                .await
+                {
+                    emit_event(new_event(
+                        id,
+                        "network_drop",
+                        format!("request_vote {} -> {} dropped by control plane", id, peer),
+                        term,
+                        0,
+                        0,
+                        0,
+                    ));
+                    continue;
+                }
                 let addr = format!("http://127.0.0.1:{}", 50050 + *peer);
                 if let Some(resp) = send_request_vote_rpc(addr, req.clone()).await {
                     if resp.term > term {
@@ -228,10 +346,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     tokio::spawn(async move {
+        let control_http = reqwest::Client::new();
         let heartbeat_interval = Duration::from_millis(200);
 
         loop {
             tokio::time::sleep(heartbeat_interval).await;
+
+            if !enabled_for_heartbeats.load(Ordering::Relaxed) {
+                continue;
+            }
 
             let is_leader = {
                 let n = node_for_heartbeats.lock().expect("node lock poisoned");
@@ -251,6 +374,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(req) = req_for_peer else {
                     continue;
                 };
+
+                if !is_link_allowed(
+                    &control_http,
+                    control_for_heartbeats.as_deref(),
+                    id,
+                    *peer,
+                )
+                .await
+                {
+                    emit_event(new_event(
+                        id,
+                        "network_drop",
+                        format!("append_entries {} -> {} dropped by control plane", id, peer),
+                        req.term,
+                        req.leader_commit,
+                        req.leader_commit,
+                        req.prev_log_index + req.entries.len() as u64,
+                    ));
+                    continue;
+                }
 
                 let addr = format!("http://127.0.0.1:{}", 50050 + *peer);
                 if let Some(resp) = send_append_entries_rpc(addr, req).await {

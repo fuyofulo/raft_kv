@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
@@ -23,6 +24,7 @@ pub struct RaftRpcService {
     pub node: Arc<Mutex<RaftNode>>,
     pub last_heartbeat: Arc<Mutex<Instant>>,
     pub storage_path: Arc<PathBuf>,
+    pub node_enabled: Arc<AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -31,6 +33,9 @@ impl RaftRpc for RaftRpcService {
         &self,
         request: Request<RequestVoteRequest>,
     ) -> Result<Response<RequestVoteReply>, Status> {
+        if !self.node_enabled.load(Ordering::Relaxed) {
+            return Err(Status::unavailable("node is stopped by control plane"));
+        }
         let req = from_proto_request_vote(request.into_inner());
 
         let resp = self
@@ -62,6 +67,9 @@ impl RaftRpc for RaftRpcService {
         &self,
         request: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesReply>, Status> {
+        if !self.node_enabled.load(Ordering::Relaxed) {
+            return Err(Status::unavailable("node is stopped by control plane"));
+        }
         {
             let mut hb = self
                 .last_heartbeat
@@ -86,6 +94,9 @@ impl RaftRpc for RaftRpcService {
         &self,
         request: Request<ClientWriteRequest>,
     ) -> Result<Response<ClientWriteReply>, Status> {
+        if !self.node_enabled.load(Ordering::Relaxed) {
+            return Err(Status::unavailable("node is stopped by control plane"));
+        }
         let req = from_proto_client_write(request.into_inner())
             .map_err(|e| Status::invalid_argument(format!("bad client write request: {}", e)))?;
 
@@ -201,6 +212,9 @@ impl RaftRpc for RaftRpcService {
         &self,
         request: Request<ClientReadRequest>,
     ) -> Result<Response<ClientReadReply>, Status> {
+        if !self.node_enabled.load(Ordering::Relaxed) {
+            return Err(Status::unavailable("node is stopped by control plane"));
+        }
         let key = request.into_inner().key;
 
         let (term, peers, quorum, commit_index, known_leader, is_leader) = {

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use crate::raft::events::{emit_event, new_event};
 
 pub type NodeId = u64;
 pub type Term = u64;
@@ -161,6 +162,15 @@ impl RaftNode {
         self.volatile.role = Role::Follower;
         self.leader_state = None;
         self.known_leader = None;
+        emit_event(new_event(
+            self.id,
+            "role_change",
+            format!("became follower term={}", self.persistent.current_term),
+            self.persistent.current_term,
+            self.volatile.commit_index,
+            self.volatile.last_applied,
+            self.last_log_index(),
+        ));
     }
     
     pub fn become_candidate(&mut self) {
@@ -169,6 +179,15 @@ impl RaftNode {
         self.persistent.voted_for = Some(self.id);
         self.leader_state = None;
         self.known_leader = None;
+        emit_event(new_event(
+            self.id,
+            "role_change",
+            format!("became candidate term={}", self.persistent.current_term),
+            self.persistent.current_term,
+            self.volatile.commit_index,
+            self.volatile.last_applied,
+            self.last_log_index(),
+        ));
     }
     
     pub fn become_leader(&mut self) {
@@ -184,6 +203,15 @@ impl RaftNode {
         }
         
         self.leader_state = Some(leader_state);
+        emit_event(new_event(
+            self.id,
+            "role_change",
+            format!("became leader term={}", self.persistent.current_term),
+            self.persistent.current_term,
+            self.volatile.commit_index,
+            self.volatile.last_applied,
+            self.last_log_index(),
+        ));
     }
     
     pub fn on_request_vote(&mut self, req: RequestVote) -> RequestVoteResponse {
@@ -530,6 +558,15 @@ impl RaftNode {
             self.volatile.commit_index, self.volatile.last_applied
         );
         println!("---");
+        emit_event(new_event(
+            self.id,
+            "log_update",
+            reason.to_string(),
+            self.persistent.current_term,
+            self.volatile.commit_index,
+            self.volatile.last_applied,
+            self.last_log_index(),
+        ));
     }
 
     fn command_as_string(cmd: &Command) -> String {
