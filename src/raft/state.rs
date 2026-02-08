@@ -7,6 +7,7 @@ pub type LogIndex = u64;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Put { key: String, value: String },
+    Update { key: String, value: String },
     Delete { key: String },
     Noop
 }
@@ -14,7 +15,9 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub term: Term,
-    pub command: Command
+    pub command: Command,
+    pub client_id: Option<u64>,
+    pub request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,8 +87,18 @@ pub struct ClientWriteRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientWriteResult {
-    Ok,
+    Ok {
+        log_index: LogIndex,
+        from_cache: bool,
+        message: String,
+    },
     NotLeader { known_leader: Option<NodeId> }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientReadResult {
+    Value(Option<String>),
+    NotLeader { known_leader: Option<NodeId> },
 }
 
 #[derive(Clone, Debug)]
@@ -95,7 +108,16 @@ pub struct RaftNode {
     pub persistent: PersistentState,
     pub volatile: VolatileState,
     pub leader_state: Option<LeaderState>,
-    pub known_leader: Option<NodeId>
+    pub known_leader: Option<NodeId>,
+    pub state_machine: HashMap<String, String>,
+    pub dedup_table: HashMap<u64, CachedClientReply>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedClientReply {
+    pub request_id: u64,
+    pub log_index: LogIndex,
+    pub message: String,
 }
 
 impl RaftNode {
@@ -223,6 +245,7 @@ impl RaftNode {
             };
         }
         
+        let mut log_changed = false;
         let mut insert_index = req.prev_log_index + 1;
         for entry in req.entries {
             
@@ -235,18 +258,25 @@ impl RaftNode {
                 Some(_) => {
                     self.persistent.log.truncate(vec_idx);
                     self.persistent.log.push(entry);
+                    log_changed = true;
                     insert_index += 1;
                 }
                 None => {
                     self.persistent.log.push(entry);
+                    log_changed = true;
                     insert_index += 1;
                 }
             }
+        }
+
+        if log_changed {
+            self.print_log_dump("append_entries updated log");
         }
         
         let new_commit = std::cmp::min(req.leader_commit, self.last_log_index());
         if new_commit > self.volatile.commit_index {
             self.volatile.commit_index = new_commit;
+            self.apply_committed_entries();
         }
         
         AppendEntriesResponse {
@@ -286,6 +316,7 @@ impl RaftNode {
             }
         }
         self.volatile.commit_index = new_commit;
+        self.apply_committed_entries();
     }
     
     pub fn on_append_entries_response(&mut self, from: NodeId, response: AppendEntriesResponse) {
@@ -314,5 +345,198 @@ impl RaftNode {
         }
         
         self.advance_commit_index();
+    }
+
+    pub fn on_client_write(
+        &mut self,
+        req: ClientWriteRequest,
+    ) -> ClientWriteResult {
+        if self.volatile.role != Role::Leader {
+            return ClientWriteResult::NotLeader {
+                known_leader: self.known_leader,
+            };
+        }
+
+        if let Some(cached) = self.dedup_table.get(&req.client_id) {
+            if cached.request_id >= req.request_id {
+                return ClientWriteResult::Ok {
+                    log_index: cached.log_index,
+                    from_cache: true,
+                    message: cached.message.clone(),
+                };
+            }
+        }
+
+        if let Some(existing_idx) = self.find_request_in_log(req.client_id, req.request_id) {
+            return ClientWriteResult::Ok {
+                log_index: existing_idx,
+                from_cache: false,
+                message: "request already present in log".to_string(),
+            };
+        }
+
+        let entry = LogEntry {
+            term: self.persistent.current_term,
+            command: req.command,
+            client_id: Some(req.client_id),
+            request_id: Some(req.request_id),
+        };
+        self.persistent.log.push(entry);
+        self.print_log_dump("client_write appended entry");
+
+        ClientWriteResult::Ok {
+            log_index: self.last_log_index(),
+            from_cache: false,
+            message: "accepted by leader".to_string(),
+        }
+    }
+
+    pub fn on_client_read(&self, key: &str) -> ClientReadResult {
+        if self.volatile.role != Role::Leader {
+            return ClientReadResult::NotLeader {
+                known_leader: self.known_leader,
+            };
+        }
+        ClientReadResult::Value(self.state_machine.get(key).cloned())
+    }
+
+    pub fn build_append_entries_for_peer(&self, peer: NodeId) -> Option<AppendEntries> {
+        if self.volatile.role != Role::Leader {
+            return None;
+        }
+
+        let leader_state = self.leader_state.as_ref()?;
+        let next_index = leader_state
+            .next_index
+            .get(&peer)
+            .copied()
+            .unwrap_or(self.last_log_index() + 1);
+        let prev_log_index = next_index.saturating_sub(1);
+        let prev_log_term = self.log_term_at(prev_log_index)?;
+
+        let start = next_index.saturating_sub(1) as usize;
+        let entries = if start < self.persistent.log.len() {
+            self.persistent.log[start..].to_vec()
+        } else {
+            vec![]
+        };
+
+        Some(AppendEntries {
+            term: self.persistent.current_term,
+            leader_id: self.id,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit: self.volatile.commit_index,
+        })
+    }
+
+    fn find_request_in_log(&self, client_id: u64, request_id: u64) -> Option<LogIndex> {
+        self.persistent
+            .log
+            .iter()
+            .enumerate()
+            .find_map(|(idx, entry)| {
+                if entry.client_id == Some(client_id) && entry.request_id == Some(request_id) {
+                    Some((idx as LogIndex) + 1)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn apply_committed_entries(&mut self) {
+        while self.volatile.last_applied < self.volatile.commit_index {
+            let index = self.volatile.last_applied + 1;
+            let vec_idx = (index - 1) as usize;
+            let Some(entry) = self.persistent.log.get(vec_idx).cloned() else {
+                break;
+            };
+
+            self.apply_entry(index, entry);
+            self.volatile.last_applied = index;
+        }
+    }
+
+    fn apply_entry(&mut self, index: LogIndex, entry: LogEntry) {
+        if let (Some(client_id), Some(request_id)) = (entry.client_id, entry.request_id) {
+            if let Some(cached) = self.dedup_table.get(&client_id) {
+                if cached.request_id >= request_id {
+                    return;
+                }
+            }
+
+            let message = self.apply_command(&entry.command);
+            self.dedup_table.insert(
+                client_id,
+                CachedClientReply {
+                    request_id,
+                    log_index: index,
+                    message,
+                },
+            );
+            return;
+        }
+
+        self.apply_command(&entry.command);
+    }
+
+    fn apply_command(&mut self, command: &Command) -> String {
+        match command {
+            Command::Put { key, value } => {
+                self.state_machine.insert(key.clone(), value.clone());
+                "ok".to_string()
+            }
+            Command::Update { key, value } => {
+                if self.state_machine.contains_key(key) {
+                    self.state_machine.insert(key.clone(), value.clone());
+                    "ok".to_string()
+                } else {
+                    "key not found".to_string()
+                }
+            }
+            Command::Delete { key } => {
+                self.state_machine.remove(key);
+                "ok".to_string()
+            }
+            Command::Noop => "noop".to_string(),
+        }
+    }
+
+    fn print_log_dump(&self, reason: &str) {
+        println!("---");
+        println!("log");
+        println!(
+            "node={} term={} role={:?} reason={}",
+            self.id, self.persistent.current_term, self.volatile.role, reason
+        );
+        if self.persistent.log.is_empty() {
+            println!("(empty)");
+        } else {
+            for (idx, entry) in self.persistent.log.iter().enumerate() {
+                println!(
+                    "[{}] term={} cmd={} client_id={:?} request_id={:?}",
+                    idx + 1,
+                    entry.term,
+                    Self::command_as_string(&entry.command),
+                    entry.client_id,
+                    entry.request_id
+                );
+            }
+        }
+        println!(
+            "commit_index={} last_applied={}",
+            self.volatile.commit_index, self.volatile.last_applied
+        );
+        println!("---");
+    }
+
+    fn command_as_string(cmd: &Command) -> String {
+        match cmd {
+            Command::Put { key, value } => format!("put {}={}", key, value),
+            Command::Update { key, value } => format!("update {}={}", key, value),
+            Command::Delete { key } => format!("delete {}", key),
+            Command::Noop => "noop".to_string(),
+        }
     }
 }
