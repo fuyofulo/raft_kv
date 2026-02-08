@@ -2,6 +2,8 @@
 
 A small distributed key-value store built in Rust on top of the Raft consensus algorithm.
 
+![Screenshot](raft-kv-ss.png)
+
 This project runs multiple Raft nodes over gRPC and supports leader election, log replication, and client operations through a CLI.
 
 ## Stack
