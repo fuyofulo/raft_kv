@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;
 pub type Term = u64;
 pub type LogIndex = u64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     Put { key: String, value: String },
     Update { key: String, value: String },
@@ -12,7 +13,7 @@ pub enum Command {
     Noop
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub term: Term,
     pub command: Command,
@@ -27,7 +28,7 @@ pub enum Role {
     Leader,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistentState {
     pub current_term: Term,
     pub voted_for: Option<NodeId>,
@@ -113,7 +114,7 @@ pub struct RaftNode {
     pub dedup_table: HashMap<u64, CachedClientReply>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedClientReply {
     pub request_id: u64,
     pub log_index: LogIndex,

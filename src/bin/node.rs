@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -7,6 +8,7 @@ use raft_kv::raft::state::{
     AppendEntries, AppendEntriesResponse, PersistentState, RaftNode, RequestVote,
     RequestVoteResponse, Role, VolatileState,
 };
+use raft_kv::raft::storage::{load_durable_state, save_node_state};
 use raft_kv::rpc::raft::raft_rpc_server::RaftRpcServer;
 use raft_kv::rpc::server::RaftRpcService;
 use raft_kv::rpc::convert::{to_proto_append_entries, to_proto_request_vote};
@@ -59,6 +61,17 @@ fn next_election_timeout(seed: &mut u64) -> Duration {
     Duration::from_millis(700 + jitter_ms)
 }
 
+fn persist_best_effort(node: &RaftNode, path: &Path) {
+    if let Err(e) = save_node_state(path, node) {
+        eprintln!(
+            "node {} failed to persist durable state to {}: {}",
+            node.id,
+            path.display(),
+            e
+        );
+    }
+}
+
 async fn send_request_vote_rpc(
     addr: String,
     req: RequestVote,
@@ -90,10 +103,11 @@ async fn send_append_entries_rpc(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // usage: cargo run --bin node -- <id> <listen_addr> <peer_ids_csv>
-    // example: cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5
+    // optional data path: cargo run --bin node -- <id> <listen_addr> <peer_ids_csv> <data_path>
+    // example: cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: node <id> <listen_addr> <peer_ids_csv>");
+        eprintln!("usage: node <id> <listen_addr> <peer_ids_csv> [data_path]");
         std::process::exit(1);
     }
 
@@ -101,18 +115,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = args[2].parse()?;
     let peers = parse_peers(&args[3], id);
     let peers_for_election = peers.clone();
+    let storage_path = if args.len() >= 5 {
+        PathBuf::from(&args[4])
+    } else {
+        PathBuf::from(format!("data/node-{}.json", id))
+    };
 
-    let node = Arc::new(Mutex::new(build_node(id, peers)));
+    let mut initial_node = build_node(id, peers);
+    if let Some(durable) = load_durable_state(&storage_path)? {
+        initial_node.persistent = durable.persistent;
+        initial_node.volatile.commit_index = durable
+            .commit_index
+            .min(initial_node.persistent.log.len() as u64);
+        initial_node.volatile.last_applied = durable
+            .last_applied
+            .min(initial_node.volatile.commit_index);
+        initial_node.state_machine = durable.state_machine;
+        initial_node.dedup_table = durable.dedup_table;
+        initial_node.volatile.role = Role::Follower;
+        initial_node.known_leader = None;
+        initial_node.leader_state = None;
+        println!(
+            "node {} loaded durable state from {} (term={}, log_len={}, commit_index={}, last_applied={})",
+            id,
+            storage_path.display(),
+            initial_node.persistent.current_term,
+            initial_node.persistent.log.len(),
+            initial_node.volatile.commit_index,
+            initial_node.volatile.last_applied
+        );
+    }
+
+    let node = Arc::new(Mutex::new(initial_node));
     let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
+    let storage_path = Arc::new(storage_path);
     let svc = RaftRpcService {
         node: Arc::clone(&node),
         last_heartbeat: Arc::clone(&last_heartbeat),
+        storage_path: Arc::clone(&storage_path),
     };
 
     let node_for_election = Arc::clone(&node);
     let hb_for_election = Arc::clone(&last_heartbeat);
     let node_for_heartbeats = Arc::clone(&node);
     let peers_for_heartbeats = peers_for_election.clone();
+    let storage_for_election = Arc::clone(&storage_path);
+    let storage_for_heartbeats = Arc::clone(&storage_path);
 
     tokio::spawn(async move {
         let mut seed = seed_for_node(id);
@@ -138,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (term, req) = {
                 let mut n = node_for_election.lock().expect("node lock poisoned");
                 n.become_candidate();
+                persist_best_effort(&n, storage_for_election.as_ref().as_path());
                 let req = RequestVote {
                     term: n.persistent.current_term,
                     candidate_id: n.id,
@@ -154,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if resp.term > term {
                         let mut n = node_for_election.lock().expect("node lock poisoned");
                         n.become_follower(resp.term);
+                        persist_best_effort(&n, storage_for_election.as_ref().as_path());
                         break;
                     }
                     if resp.vote_granted {
@@ -206,6 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(resp) = send_append_entries_rpc(addr, req).await {
                     let mut n = node_for_heartbeats.lock().expect("node lock poisoned");
                     n.on_append_entries_response(*peer, resp);
+                    persist_best_effort(&n, storage_for_heartbeats.as_ref().as_path());
                 }
             }
         }
