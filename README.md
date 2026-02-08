@@ -1,10 +1,13 @@
 # raft-kv
 
-A small distributed key-value store built in Rust on top of the Raft consensus algorithm.
+An implementation of the Raft consensus algorithm built from scratch in Rust, with a replicated key-value state machine.
 
 ![Screenshot](raft-kv-ss.png)
 
-This project runs multiple Raft nodes over gRPC and supports leader election, log replication, and client operations through a CLI.
+This project runs multiple Raft nodes over gRPC and includes both:
+
+- a CLI workflow for direct command/testing
+- a retro UI dashboard for visual cluster control and live Raft events
 
 ## Stack
 
@@ -13,26 +16,28 @@ This project runs multiple Raft nodes over gRPC and supports leader election, lo
 - Tonic + Prost (gRPC + protobuf)
 - Serde + serde_json (durable on-disk state)
 
-## What it currently supports
+## Implemented capabilities
 
 - Automated Raft leader election
 - Heartbeat-based leader maintenance
 - Log replication to followers
 - Commit and apply flow
 - Durable node state on disk (log + term/vote + applied state)
-- Client write operations:
-  - `put`
-  - `update`
-  - `delete`
-- Client read operation:
-  - `get`
+- Client operations: `put`, `update`, `delete`, `get`
 - Follower-to-leader redirect behavior in the client
 - Request dedup/caching using `client_id` + `request_id` metadata stored in replicated log entries
 - Write response contract: success means committed and applied (or duplicate served from cache)
-- Control-plane backend (in progress) for:
+- Control plane with:
   - live Raft event collection
-  - node start/stop toggles
-  - network partition/heal rules
+  - node start/stop controls
+  - network partition/heal controls
+  - client-command HTTP endpoint
+- UI dashboard for:
+  - viewing all 5 nodes at once
+  - live node/global event feeds
+  - node lifecycle controls
+  - partition/heal actions
+  - client command execution
 
 ## Project layout
 
@@ -47,7 +52,7 @@ This project runs multiple Raft nodes over gRPC and supports leader election, lo
 - `src/bin/control_plane.rs`: HTTP control plane + event stream
 - `ui/`: Vite + React terminal dashboard
 
-## Run
+## Run with UI
 
 From project root:
 
@@ -55,7 +60,38 @@ From project root:
 cargo build
 ```
 
+Start control plane:
+
+```bash
+cargo run --bin control_plane -- 127.0.0.1:7000
+```
+
 Start 5 nodes (use separate terminals):
+
+```bash
+cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json http://127.0.0.1:7000
+cargo run --bin node -- 2 127.0.0.1:50052 1,3,4,5 data/node-2.json http://127.0.0.1:7000
+cargo run --bin node -- 3 127.0.0.1:50053 1,2,4,5 data/node-3.json http://127.0.0.1:7000
+cargo run --bin node -- 4 127.0.0.1:50054 1,2,3,5 data/node-4.json http://127.0.0.1:7000
+cargo run --bin node -- 5 127.0.0.1:50055 1,2,3,4 data/node-5.json http://127.0.0.1:7000
+```
+
+Start UI:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Default UI URL: `http://127.0.0.1:5173`  
+Default control-plane URL used by UI: `http://127.0.0.1:7000`
+
+
+
+## Run with CLI
+
+Start nodes without UI (use separate terminals):
 
 ```bash
 cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5
@@ -63,26 +99,6 @@ cargo run --bin node -- 2 127.0.0.1:50052 1,3,4,5
 cargo run --bin node -- 3 127.0.0.1:50053 1,2,4,5
 cargo run --bin node -- 4 127.0.0.1:50054 1,2,3,5
 cargo run --bin node -- 5 127.0.0.1:50055 1,2,3,4
-```
-
-Each node stores state in `data/node-<id>.json` by default.
-
-Optional custom data path:
-
-```bash
-cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/custom-node-1.json
-```
-
-Run node with control-plane URL:
-
-```bash
-cargo run --bin node -- 1 127.0.0.1:50051 2,3,4,5 data/node-1.json http://127.0.0.1:7000
-```
-
-or set:
-
-```bash
-export CONTROL_PLANE_URL=http://127.0.0.1:7000
 ```
 
 Run client commands:
@@ -100,6 +116,9 @@ Optional explicit idempotency fields:
 cargo run --bin client -- 127.0.0.1:50051 put x 100 42 9001
 ```
 
+Each node stores state in `data/node-<id>.json` by default.  
+You can also pass a custom data path per node.
+
 ## Write semantics
 
 - `accepted=true` means the write entry reached commit and apply on the leader before reply.
@@ -115,7 +134,7 @@ cargo run --bin client -- 127.0.0.1:50051 put x 100 42 9001
   - applied key/value state
   - dedup cache
 
-## Control Plane (in progress)
+## Control plane
 
 Start control plane:
 
@@ -134,34 +153,6 @@ Useful endpoints:
 - `POST /heal`
 - `POST /client/command`
 
-## UI Dashboard
-
-The UI is a retro terminal-style dashboard for:
-
-- viewing all 5 nodes at once
-- live event/log feed
-- start/stop node controls
-- partition/heal controls
-- client command panel (`put/update/delete/get`)
-
-Run:
-
-```bash
-cd ui
-npm install
-npm run dev
-```
-
-Default UI URL: `http://127.0.0.1:5173`  
-Default control-plane URL used by UI: `http://127.0.0.1:7000`
-
-Optional override:
-
-```bash
-VITE_API_BASE=http://127.0.0.1:7000 npm run dev
-```
-
 ## Notes
 
 - Address mapping assumes node `N` listens on port `50050 + N`.
-- This is a learning/engineering project and not production-hardened yet.
