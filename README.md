@@ -2,7 +2,7 @@
 
 An implementation of the Raft consensus algorithm built from scratch in Rust, with a replicated key-value state machine.
 
-![Screenshot](raft-kv-ss.png)
+![Screenshot](raft-kv-ss-2.png)
 
 This project runs multiple Raft nodes over gRPC and includes both:
 
