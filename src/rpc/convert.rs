@@ -184,6 +184,5 @@ fn decode_command(raw: &str) -> Command {
         };
     }
 
-    // Temporary fallback; we'll harden this later.
     Command::Noop
 }
